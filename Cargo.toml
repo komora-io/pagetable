@@ -1,0 +1,9 @@
+[package]
+name = "pagetable"
+version = "0.2.0"
+edition = "2021"
+authors = ["Tyler Neely <tylerneely@gmail.com>"]
+description = "Wait-free 4-level 64-bit pagetable for contiguous atomic metadata."
+license = "GPL-3.0"
+repository = "https://github.com/komora-io/pagetable"
+documentation = "https://docs.rs/pagetable/"
