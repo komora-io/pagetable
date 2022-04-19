@@ -32,8 +32,10 @@ impl_drop_children!(L1);
 impl_drop_children!(L2);
 impl_drop_children!(L3);
 
+const FANOUT: usize = u16::MAX as usize;
+
 struct L1 {
-    children: [AtomicPtr<L2>; 65536],
+    children: [AtomicPtr<L2>; FANOUT],
 }
 
 impl Default for L1 {
@@ -45,7 +47,7 @@ impl Default for L1 {
 }
 
 struct L2 {
-    children: [AtomicPtr<L3>; 65536],
+    children: [AtomicPtr<L3>; FANOUT],
 }
 
 impl Default for L2 {
@@ -57,7 +59,7 @@ impl Default for L2 {
 }
 
 struct L3 {
-    children: [AtomicPtr<L4>; 65536],
+    children: [AtomicPtr<L4>; FANOUT],
 }
 
 impl Default for L3 {
@@ -69,7 +71,7 @@ impl Default for L3 {
 }
 
 struct L4 {
-    children: [AtomicU64; 65536],
+    children: [AtomicU64; FANOUT],
 }
 
 impl Default for L4 {
@@ -80,7 +82,7 @@ impl Default for L4 {
     }
 }
 
-fn traverse_or_install<Child: Default>(parent: &[AtomicPtr<Child>; 65536], key: u16) -> &Child {
+fn traverse_or_install<Child: Default>(parent: &[AtomicPtr<Child>; FANOUT], key: u16) -> &Child {
     let aptr_1: &AtomicPtr<Child> = &parent[key as usize];
     let mut ptr_1 = aptr_1.load(Ordering::Relaxed);
 
