@@ -16,7 +16,7 @@ macro_rules! impl_drop_children {
         impl Drop for $t {
             fn drop(&mut self) {
                 for child in &self.children {
-                    let ptr = child.load(Ordering::Relaxed);
+                    let ptr = child.load(Ordering::Acquire);
                     if !ptr.is_null() {
                         unsafe {
                             drop(Box::from_raw(ptr));
@@ -84,11 +84,11 @@ impl Default for L4 {
 
 fn traverse_or_install<Child: Default>(parent: &[AtomicPtr<Child>; FANOUT], key: u16) -> &Child {
     let aptr_1: &AtomicPtr<Child> = &parent[key as usize];
-    let mut ptr_1 = aptr_1.load(Ordering::Relaxed);
+    let mut ptr_1 = aptr_1.load(Ordering::Acquire);
 
     if ptr_1.is_null() {
         let c = Box::into_raw(Box::default());
-        match aptr_1.compare_exchange_weak(null_mut(), c, Ordering::Release, Ordering::Relaxed)
+        match aptr_1.compare_exchange_weak(null_mut(), c, Ordering::AcqRel, Ordering::Acquire)
         {
             Ok(_) => {
                 ptr_1 = c;
