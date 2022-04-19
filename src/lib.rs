@@ -11,6 +11,27 @@ pub struct PageTable {
     head: Box<L1>,
 }
 
+macro_rules! impl_drop_children {
+    ($t:ty) => {
+        impl Drop for $t {
+            fn drop(&mut self) {
+                for child in &self.children {
+                    let ptr = child.load(Ordering::Relaxed);
+                    if !ptr.is_null() {
+                        unsafe {
+                            drop(Box::from_raw(ptr));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl_drop_children!(L1);
+impl_drop_children!(L2);
+impl_drop_children!(L3);
+
 struct L1 {
     children: [AtomicPtr<L2>; 65536],
 }
@@ -59,65 +80,59 @@ impl Default for L4 {
     }
 }
 
+fn traverse_or_install<Child: Default>(parent: &[AtomicPtr<Child>; 65536], key: u16) -> &Child {
+    let aptr_1: &AtomicPtr<Child> = &parent[key as usize];
+    let mut ptr_1 = aptr_1.load(Ordering::Relaxed);
+
+    if ptr_1.is_null() {
+        let c = Box::into_raw(Box::default());
+        match aptr_1.compare_exchange_weak(null_mut(), c, Ordering::Release, Ordering::Relaxed)
+        {
+            Ok(_) => {
+                ptr_1 = c;
+            }
+            Err(cur) => {
+                ptr_1 = cur;
+                unsafe {
+                    drop(Box::from_raw(c));
+                }
+            }
+        }
+    }
+    unsafe { &*ptr_1 }
+}
+
 impl PageTable {
     pub fn get(&self, key: u64) -> &AtomicU64 {
         let bytes = key.to_be_bytes();
-        let k1 = usize::from(u16::from_be_bytes([bytes[0], bytes[1]]));
-        let k2 = usize::from(u16::from_be_bytes([bytes[2], bytes[3]]));
-        let k3 = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
-        let k4 = usize::from(u16::from_be_bytes([bytes[6], bytes[7]]));
+        let k1 = u16::from_be_bytes([bytes[0], bytes[1]]);
+        let k2 = u16::from_be_bytes([bytes[2], bytes[3]]);
+        let k3 = u16::from_be_bytes([bytes[4], bytes[5]]);
+        let k4 = u16::from_be_bytes([bytes[6], bytes[7]]);
 
-        let aptr_1: &AtomicPtr<L2> = &self.head.children[k1];
-        let mut ptr_1 = aptr_1.load(Ordering::Relaxed);
-        if ptr_1.is_null() {
-            let c = Box::into_raw(Box::default());
-            match aptr_1.compare_exchange_weak(null_mut(), c, Ordering::Relaxed, Ordering::Relaxed)
-            {
-                Ok(_) => {}
-                Err(cur) => {
-                    ptr_1 = cur;
-                    unsafe {
-                        drop(Box::from_raw(c));
-                    }
-                }
-            }
-        }
-        let l2 = unsafe { &*ptr_1 };
+        let l2 = traverse_or_install(&self.head.children, k1);
+        let l3 = traverse_or_install(&l2.children, k2);
+        let l4 = traverse_or_install(&l3.children, k3);
+        &l4.children[k4 as usize]
+    }
+}
 
-        let aptr_2: &AtomicPtr<L3> = &l2.children[k2];
-        let mut ptr_2 = aptr_2.load(Ordering::Relaxed);
-        if ptr_2.is_null() {
-            let c = Box::into_raw(Box::default());
-            match aptr_2.compare_exchange_weak(null_mut(), c, Ordering::Relaxed, Ordering::Relaxed)
-            {
-                Ok(_) => {}
-                Err(cur) => {
-                    ptr_2 = cur;
-                    unsafe {
-                        drop(Box::from_raw(c));
-                    }
-                }
-            }
-        }
-        let l3 = unsafe { &*ptr_2 };
+#[test]
+fn smoke() {
+    #[cfg(miri)]
+    const N: u64 = 1;
 
-        let aptr_3: &AtomicPtr<L4> = &l3.children[k3];
-        let mut ptr_3 = aptr_3.load(Ordering::Relaxed);
-        if ptr_3.is_null() {
-            let c = Box::into_raw(Box::default());
-            match aptr_3.compare_exchange_weak(null_mut(), c, Ordering::Relaxed, Ordering::Relaxed)
-            {
-                Ok(_) => {}
-                Err(cur) => {
-                    ptr_3 = cur;
-                    unsafe {
-                        drop(Box::from_raw(c));
-                    }
-                }
-            }
-        }
-        let l4 = unsafe { &*ptr_3 };
+    #[cfg(not(miri))]
+    const N: u64 = 100_000_000;
 
-        &l4.children[k4]
+    let pt = PageTable::default();
+
+    for i in 0..N {
+        pt.get(i).fetch_add(1, Ordering::Relaxed);
+    }
+
+    for i in 0..N {
+        let value = pt.get(i).load(Ordering::Relaxed);
+        assert_eq!(value, 1);
     }
 }
