@@ -28,6 +28,7 @@ const FANOUT: usize = 1 << 16;
 #[derive(Default)]
 pub struct PageTable {
     head: Box<L1>,
+    approximate_leaf_count: AtomicU64,
 }
 
 struct L1 {
@@ -46,30 +47,37 @@ struct L4 {
     children: [AtomicU64; FANOUT],
 }
 
-fn traverse_or_install<Child: Default>(parent: &[AtomicPtr<Child>; FANOUT], key: u16) -> &Child {
-    let aptr_1: &AtomicPtr<Child> = &parent[key as usize];
-    let mut ptr_1 = aptr_1.load(Ordering::Acquire);
+fn traverse_or_install<Child: Default>(parent: &[AtomicPtr<Child>; FANOUT], key: u16) -> (&Child, bool) {
+    let atomic_ptr: &AtomicPtr<Child> = &parent[key as usize];
+    let mut ptr = atomic_ptr.load(Ordering::Acquire);
 
-    if ptr_1.is_null() {
-        let c = Box::into_raw(Box::default());
-        match aptr_1.compare_exchange_weak(null_mut(), c, Ordering::AcqRel, Ordering::Acquire)
+    let mut installed = false;
+    if ptr.is_null() {
+        let new_child_ptr = Box::into_raw(Box::default());
+        match atomic_ptr.compare_exchange_weak(null_mut(), new_child_ptr, Ordering::AcqRel, Ordering::Acquire)
         {
             Ok(_) => {
-                ptr_1 = c;
+                ptr = new_child_ptr;
+                installed = true;
             }
-            Err(cur) => {
-                ptr_1 = cur;
+            Err(cur_ptr) => {
+                ptr = cur_ptr;
                 unsafe {
-                    drop(Box::from_raw(c));
+                    drop(Box::from_raw(new_child_ptr));
                 }
             }
         }
-    }
+    };
 
-    unsafe { &*ptr_1 }
+    let child = unsafe { &*ptr };
+
+    (child, installed)
 }
 
 impl PageTable {
+    /// Get the `AtomicU64` associated with the provided key,
+    /// installing all required pages if it does not exist yet.
+    /// Defaults to `0`.
     pub fn get(&self, key: u64) -> &AtomicU64 {
         let bytes = key.to_be_bytes();
         let k1 = u16::from_be_bytes([bytes[0], bytes[1]]);
@@ -77,10 +85,23 @@ impl PageTable {
         let k3 = u16::from_be_bytes([bytes[4], bytes[5]]);
         let k4 = u16::from_be_bytes([bytes[6], bytes[7]]);
 
-        let l2 = traverse_or_install(&self.head.children, k1);
-        let l3 = traverse_or_install(&l2.children, k2);
-        let l4 = traverse_or_install(&l3.children, k3);
+        let l2 = traverse_or_install(&self.head.children, k1).0;
+        let l3 = traverse_or_install(&l2.children, k2).0;
+        let (l4, installed_leaf) = traverse_or_install(&l3.children, k3);
+
+        if installed_leaf {
+            self.approximate_leaf_count.fetch_add(1, Ordering::Relaxed);
+        }
+
         &l4.children[k4 as usize]
+    }
+
+    /// A lagging count of the number of instantiated items, stepping
+    /// up by 2^16 at a time. Simply multiplies the number of installed
+    /// leaf pages by the child page fan-out. Incremented after the page
+    /// is installed.
+    pub fn approximate_max_child_count(&self) -> u64 {
+        self.approximate_leaf_count.load(Ordering::Relaxed) * FANOUT as u64
     }
 }
 
