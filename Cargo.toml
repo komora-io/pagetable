@@ -1,6 +1,6 @@
 [package]
 name = "pagetable"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 authors = ["Tyler Neely <tylerneely@gmail.com>"]
 description = "Wait-free 4-level 64-bit pagetable for contiguous atomic metadata."

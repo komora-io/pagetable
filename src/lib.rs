@@ -47,15 +47,22 @@ struct L4 {
     children: [AtomicU64; FANOUT],
 }
 
-fn traverse_or_install<Child: Default>(parent: &[AtomicPtr<Child>; FANOUT], key: u16) -> (&Child, bool) {
+fn traverse_or_install<Child: Default>(
+    parent: &[AtomicPtr<Child>; FANOUT],
+    key: u16,
+) -> (&Child, bool) {
     let atomic_ptr: &AtomicPtr<Child> = &parent[key as usize];
     let mut ptr = atomic_ptr.load(Ordering::Acquire);
 
     let mut installed = false;
     if ptr.is_null() {
         let new_child_ptr = Box::into_raw(Box::default());
-        match atomic_ptr.compare_exchange_weak(null_mut(), new_child_ptr, Ordering::AcqRel, Ordering::Acquire)
-        {
+        match atomic_ptr.compare_exchange(
+            null_mut(),
+            new_child_ptr,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
             Ok(_) => {
                 ptr = new_child_ptr;
                 installed = true;
@@ -119,7 +126,7 @@ macro_rules! impl_drop_children {
                 }
             }
         }
-    }
+    };
 }
 
 impl_drop_children!(L1);
@@ -136,7 +143,7 @@ macro_rules! impl_zeroed_default {
                 }
             }
         }
-    }
+    };
 }
 
 impl_zeroed_default!(L1);
