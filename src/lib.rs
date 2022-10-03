@@ -1,8 +1,28 @@
 use std::mem::MaybeUninit;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI16, AtomicI32, AtomicI64, AtomicI8, AtomicIsize, AtomicPtr, AtomicU16,
+    AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+};
 
 const FANOUT: usize = 1 << 16;
+
+/// This trait is true for numerical values that are valid
+/// even if they are initialized to zero bytes.
+pub trait Zeroable {}
+
+impl Zeroable for AtomicBool {}
+impl Zeroable for AtomicI8 {}
+impl Zeroable for AtomicI16 {}
+impl Zeroable for AtomicI32 {}
+impl Zeroable for AtomicI64 {}
+impl Zeroable for AtomicIsize {}
+impl Zeroable for AtomicU8 {}
+impl Zeroable for AtomicU16 {}
+impl Zeroable for AtomicU32 {}
+impl Zeroable for AtomicU64 {}
+impl Zeroable for AtomicUsize {}
+impl<T> Zeroable for AtomicPtr<T> {}
 
 /// A simple 4-level wait-free atomic pagetable. Punches through
 /// to the last level and installs any necessary pages along the way.
@@ -12,9 +32,9 @@ const FANOUT: usize = 1 << 16;
 /// # Examples
 ///
 /// ```rust
-/// use std::sync::atomic::Ordering;
+/// use std::sync::atomic::{AtomicU64, Ordering};
 ///
-/// let pt = pagetable::PageTable::default();
+/// let pt = pagetable::PageTable::<AtomicU64>::default();
 ///
 /// for i in 0..100_000_000 {
 ///     pt.get(i).fetch_add(1, Ordering::SeqCst);
@@ -26,25 +46,25 @@ const FANOUT: usize = 1 << 16;
 /// }
 /// ```
 #[derive(Default)]
-pub struct PageTable {
-    head: Box<L1>,
+pub struct PageTable<T: Zeroable> {
+    head: Box<L1<T>>,
     approximate_leaf_count: AtomicU64,
 }
 
-struct L1 {
-    children: [AtomicPtr<L2>; FANOUT],
+struct L1<T> {
+    children: [AtomicPtr<L2<T>>; FANOUT],
 }
 
-struct L2 {
-    children: [AtomicPtr<L3>; FANOUT],
+struct L2<T> {
+    children: [AtomicPtr<L3<T>>; FANOUT],
 }
 
-struct L3 {
-    children: [AtomicPtr<L4>; FANOUT],
+struct L3<T> {
+    children: [AtomicPtr<L4<T>>; FANOUT],
 }
 
-struct L4 {
-    children: [AtomicU64; FANOUT],
+struct L4<T> {
+    children: [T; FANOUT],
 }
 
 fn traverse_or_install<Child: Default>(
@@ -81,11 +101,11 @@ fn traverse_or_install<Child: Default>(
     (child, installed)
 }
 
-impl PageTable {
+impl<T: Zeroable> PageTable<T> {
     /// Get the `AtomicU64` associated with the provided key,
     /// installing all required pages if it does not exist yet.
     /// Defaults to `0`.
-    pub fn get(&self, key: u64) -> &AtomicU64 {
+    pub fn get(&self, key: u64) -> &T {
         let bytes = key.to_be_bytes();
         let k1 = u16::from_be_bytes([bytes[0], bytes[1]]);
         let k2 = u16::from_be_bytes([bytes[2], bytes[3]]);
@@ -114,7 +134,7 @@ impl PageTable {
 
 macro_rules! impl_drop_children {
     ($t:ty) => {
-        impl Drop for $t {
+        impl<T> Drop for $t {
             fn drop(&mut self) {
                 for child in &self.children {
                     let ptr = child.load(Ordering::Acquire);
@@ -129,14 +149,14 @@ macro_rules! impl_drop_children {
     };
 }
 
-impl_drop_children!(L1);
-impl_drop_children!(L2);
-impl_drop_children!(L3);
+impl_drop_children!(L1<T>);
+impl_drop_children!(L2<T>);
+impl_drop_children!(L3<T>);
 // not needed for L4
 
 macro_rules! impl_zeroed_default {
     ($t:ty) => {
-        impl Default for $t {
+        impl<T> Default for $t {
             fn default() -> Self {
                 Self {
                     children: unsafe { MaybeUninit::zeroed().assume_init() },
@@ -146,10 +166,10 @@ macro_rules! impl_zeroed_default {
     };
 }
 
-impl_zeroed_default!(L1);
-impl_zeroed_default!(L2);
-impl_zeroed_default!(L3);
-impl_zeroed_default!(L4);
+impl_zeroed_default!(L1<T>);
+impl_zeroed_default!(L2<T>);
+impl_zeroed_default!(L3<T>);
+impl_zeroed_default!(L4<T>);
 
 #[test]
 fn smoke() {
@@ -159,7 +179,7 @@ fn smoke() {
     #[cfg(not(miri))]
     const N: u64 = 100_000_000;
 
-    let pt = PageTable::default();
+    let pt = PageTable::<AtomicU64>::default();
 
     for i in 0..N {
         pt.get(i).fetch_add(1, Ordering::Relaxed);
