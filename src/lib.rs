@@ -1,8 +1,11 @@
 use std::mem::MaybeUninit;
 use std::ptr::null_mut;
-use std::sync::atomic::{
-    AtomicBool, AtomicI16, AtomicI32, AtomicI64, AtomicI8, AtomicIsize, AtomicPtr, AtomicU16,
-    AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+use std::sync::{
+    atomic::{
+        AtomicBool, AtomicI16, AtomicI32, AtomicI64, AtomicI8, AtomicIsize, AtomicPtr, AtomicU16,
+        AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+    },
+    Arc,
 };
 
 const FANOUT: usize = 1 << 16;
@@ -45,10 +48,9 @@ impl<T> Zeroable for AtomicPtr<T> {}
 ///     assert_eq!(value, 1);
 /// }
 /// ```
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PageTable<T: Zeroable> {
-    head: Box<L1<T>>,
-    approximate_leaf_count: AtomicU64,
+    head: Arc<L1<T>>,
 }
 
 struct L1<T> {
@@ -67,14 +69,13 @@ struct L4<T> {
     children: [T; FANOUT],
 }
 
-fn traverse_or_install<Child: Default>(
-    parent: &[AtomicPtr<Child>; FANOUT],
-    key: u16,
-) -> (&Child, bool) {
+// Punches-through an atomic pointer and either dereferences it or attempts to create it.
+// This is conveniently wait-free due to the bounded maximum amount of work that may happen
+// in this process.
+fn traverse_or_install<Child: Default>(parent: &[AtomicPtr<Child>; FANOUT], key: u16) -> &Child {
     let atomic_ptr: &AtomicPtr<Child> = &parent[key as usize];
     let mut ptr = atomic_ptr.load(Ordering::Acquire);
 
-    let mut installed = false;
     if ptr.is_null() {
         let new_child_ptr = Box::into_raw(Box::default());
         match atomic_ptr.compare_exchange(
@@ -85,7 +86,6 @@ fn traverse_or_install<Child: Default>(
         ) {
             Ok(_) => {
                 ptr = new_child_ptr;
-                installed = true;
             }
             Err(cur_ptr) => {
                 ptr = cur_ptr;
@@ -96,9 +96,7 @@ fn traverse_or_install<Child: Default>(
         }
     };
 
-    let child = unsafe { &*ptr };
-
-    (child, installed)
+    unsafe { &*ptr }
 }
 
 impl<T: Zeroable> PageTable<T> {
@@ -112,23 +110,11 @@ impl<T: Zeroable> PageTable<T> {
         let k3 = u16::from_be_bytes([bytes[4], bytes[5]]);
         let k4 = u16::from_be_bytes([bytes[6], bytes[7]]);
 
-        let l2 = traverse_or_install(&self.head.children, k1).0;
-        let l3 = traverse_or_install(&l2.children, k2).0;
-        let (l4, installed_leaf) = traverse_or_install(&l3.children, k3);
-
-        if installed_leaf {
-            self.approximate_leaf_count.fetch_add(1, Ordering::Relaxed);
-        }
+        let l2 = traverse_or_install(&self.head.children, k1);
+        let l3 = traverse_or_install(&l2.children, k2);
+        let l4 = traverse_or_install(&l3.children, k3);
 
         &l4.children[k4 as usize]
-    }
-
-    /// A lagging count of the number of instantiated items, stepping
-    /// up by 2^16 at a time. Simply multiplies the number of installed
-    /// leaf pages by the child page fan-out. Incremented after the page
-    /// is installed.
-    pub fn approximate_max_child_count(&self) -> u64 {
-        self.approximate_leaf_count.load(Ordering::Relaxed) * FANOUT as u64
     }
 }
 
