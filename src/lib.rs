@@ -48,9 +48,17 @@ impl<T> Zeroable for AtomicPtr<T> {}
 ///     assert_eq!(value, 1);
 /// }
 /// ```
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct PageTable<T: Zeroable> {
     head: Arc<L1<T>>,
+}
+
+impl<T: Zeroable> Clone for PageTable<T> {
+    fn clone(&self) -> Self {
+        PageTable {
+            head: self.head.clone(),
+        }
+    }
 }
 
 struct L1<T> {
