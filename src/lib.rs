@@ -10,21 +10,53 @@ use std::sync::{
 
 const FANOUT: usize = 1 << 16;
 
+fn _impl_send_sync() {
+    fn is_send<T: Send>() {}
+    fn is_sync<T: Sync>() {}
+
+    is_send::<PageTable<u8>>();
+    is_sync::<PageTable<u8>>();
+    is_send::<PageTable<AtomicU8>>();
+    is_sync::<PageTable<AtomicU8>>();
+}
+
 /// This trait is true for numerical values that are valid
 /// even if they are initialized to zero bytes.
 pub trait Zeroable {}
 
-impl Zeroable for AtomicBool {}
-impl Zeroable for AtomicI8 {}
-impl Zeroable for AtomicI16 {}
-impl Zeroable for AtomicI32 {}
-impl Zeroable for AtomicI64 {}
-impl Zeroable for AtomicIsize {}
-impl Zeroable for AtomicU8 {}
-impl Zeroable for AtomicU16 {}
-impl Zeroable for AtomicU32 {}
-impl Zeroable for AtomicU64 {}
-impl Zeroable for AtomicUsize {}
+macro_rules! impl_zeroable {
+    ($($t:ty),+) => {
+        $(
+            impl Zeroable for $t {}
+        )+
+    };
+}
+
+impl_zeroable!(
+    bool,
+    u8,
+    i8,
+    u16,
+    i16,
+    u32,
+    i32,
+    u64,
+    i64,
+    u128,
+    i128,
+    AtomicBool,
+    AtomicI8,
+    AtomicI16,
+    AtomicI32,
+    AtomicI64,
+    AtomicIsize,
+    AtomicU8,
+    AtomicU16,
+    AtomicU32,
+    AtomicU64,
+    AtomicUsize
+);
+
 impl<T> Zeroable for AtomicPtr<T> {}
 
 /// A simple 4-level wait-free atomic pagetable. Punches through
@@ -50,13 +82,42 @@ impl<T> Zeroable for AtomicPtr<T> {}
 /// ```
 #[derive(Default)]
 pub struct PageTable<T: Zeroable> {
-    head: Arc<L1<T>>,
+    inner: Arc<PageTableInner<T>>,
 }
 
 impl<T: Zeroable> Clone for PageTable<T> {
     fn clone(&self) -> Self {
         PageTable {
-            head: self.head.clone(),
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct PageTableInner<T: Zeroable> {
+    l1: AtomicPtr<L1<T>>,
+    l2: AtomicPtr<L2<T>>,
+    l3: AtomicPtr<L3<T>>,
+    l4: AtomicPtr<L4<T>>,
+}
+
+impl<T: Zeroable> Drop for PageTableInner<T> {
+    fn drop(&mut self) {
+        let l1 = self.l1.load(Ordering::Acquire);
+        if !l1.is_null() {
+            unsafe { drop(Box::from_raw(l1)) }
+        }
+        let l2 = self.l2.load(Ordering::Acquire);
+        if !l2.is_null() {
+            unsafe { drop(Box::from_raw(l2)) }
+        }
+        let l3 = self.l3.load(Ordering::Acquire);
+        if !l3.is_null() {
+            unsafe { drop(Box::from_raw(l3)) }
+        }
+        let l4 = self.l4.load(Ordering::Acquire);
+        if !l4.is_null() {
+            unsafe { drop(Box::from_raw(l4)) }
         }
     }
 }
@@ -77,11 +138,8 @@ struct L4<T> {
     children: [T; FANOUT],
 }
 
-// Punches-through an atomic pointer and either dereferences it or attempts to create it.
-// This is conveniently wait-free due to the bounded maximum amount of work that may happen
-// in this process.
-fn traverse_or_install<Child: Default>(parent: &[AtomicPtr<Child>; FANOUT], key: u16) -> &Child {
-    let atomic_ptr: &AtomicPtr<Child> = &parent[key as usize];
+#[inline]
+fn punch_through<Child: Default>(atomic_ptr: &AtomicPtr<Child>) -> &Child {
     let mut ptr = atomic_ptr.load(Ordering::Acquire);
 
     if ptr.is_null() {
@@ -107,6 +165,14 @@ fn traverse_or_install<Child: Default>(parent: &[AtomicPtr<Child>; FANOUT], key:
     unsafe { &*ptr }
 }
 
+// Punches-through an atomic pointer and either dereferences it or attempts to create it.
+// This is conveniently wait-free due to the bounded maximum amount of work that may happen
+// in this process.
+fn traverse_or_install<Child: Default>(parent: &[AtomicPtr<Child>; FANOUT], key: u16) -> &Child {
+    let atomic_ptr: &AtomicPtr<Child> = &parent[key as usize];
+    punch_through(atomic_ptr)
+}
+
 impl<T: Zeroable> PageTable<T> {
     /// Get the `AtomicU64` associated with the provided key,
     /// installing all required pages if it does not exist yet.
@@ -118,11 +184,35 @@ impl<T: Zeroable> PageTable<T> {
         let k3 = u16::from_be_bytes([bytes[4], bytes[5]]);
         let k4 = u16::from_be_bytes([bytes[6], bytes[7]]);
 
-        let l2 = traverse_or_install(&self.head.children, k1);
-        let l3 = traverse_or_install(&l2.children, k2);
-        let l4 = traverse_or_install(&l3.children, k3);
+        let direct_4 = k1 | k2 | k3 == 0;
+        let direct_3 = k1 | k2 == 0;
+        let direct_2 = k1 == 0;
+
+        let l4 = if direct_4 {
+            punch_through(&self.inner.l4)
+        } else if direct_3 {
+            let l3 = punch_through(&self.inner.l3);
+            traverse_or_install(&l3.children, k3)
+        } else if direct_2 {
+            let l2 = punch_through(&self.inner.l2);
+            let l3 = traverse_or_install(&l2.children, k2);
+            traverse_or_install(&l3.children, k3)
+        } else {
+            let l1 = punch_through(&self.inner.l1);
+            let l2 = traverse_or_install(&l1.children, k1);
+            let l3 = traverse_or_install(&l2.children, k2);
+            traverse_or_install(&l3.children, k3)
+        };
 
         &l4.children[k4 as usize]
+    }
+}
+
+impl<T: Zeroable, I: Into<u64>> std::ops::Index<I> for PageTable<T> {
+    type Output = T;
+
+    fn index(&self, index: I) -> &Self::Output {
+        self.get(index.into())
     }
 }
 
