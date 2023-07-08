@@ -14,8 +14,6 @@ fn _impl_send_sync() {
     fn is_send<T: Send>() {}
     fn is_sync<T: Sync>() {}
 
-    is_send::<PageTable<u8>>();
-    is_sync::<PageTable<u8>>();
     is_send::<PageTable<AtomicU8>>();
     is_sync::<PageTable<AtomicU8>>();
 }
@@ -33,17 +31,6 @@ macro_rules! impl_zeroable {
 }
 
 impl_zeroable!(
-    bool,
-    u8,
-    i8,
-    u16,
-    i16,
-    u32,
-    i32,
-    u64,
-    i64,
-    u128,
-    i128,
     AtomicBool,
     AtomicI8,
     AtomicI16,
@@ -62,7 +49,25 @@ impl<T> Zeroable for AtomicPtr<T> {}
 /// A simple 4-level wait-free atomic pagetable. Punches through
 /// to the last level and installs any necessary pages along the way.
 ///
-/// Works well for big contiguous metadata.
+/// Works well for big contiguous metadata. Defaults all values to
+/// zeroed bits, so this only works with atomic values, as it's not
+/// distinguishable whether a value was ever set to 0 or simply never
+/// initialized.
+///
+/// Warning: don't use this for sparse keyspaces, as any time a key
+/// in a 2^16 range is touched for the first time, the zeroed slabs
+/// of values and parents (each with 2^16 children) will be created. For
+/// 64-bit values (and parent levels that point down) each slab is
+/// `8 * 2^16` bytes of memory, or 512kb. It is expected that this
+/// page table will be used for very hot global shared metadata.
+///
+/// There are some simple optimizations for when only the lowest bits
+/// in the `u64` are used, which skips allocation and traversal of
+/// parent levels. For tables where only keys `0..2^16` are used,
+/// traversals can jump directly to the leaf slab, and avoid allocations.
+///
+/// The same principle is applied for avoiding levels when only the bottom
+/// 32 or 48 bits are used for keys.
 ///
 /// # Examples
 ///
@@ -168,6 +173,7 @@ fn punch_through<Child: Default>(atomic_ptr: &AtomicPtr<Child>) -> &Child {
 // Punches-through an atomic pointer and either dereferences it or attempts to create it.
 // This is conveniently wait-free due to the bounded maximum amount of work that may happen
 // in this process.
+#[inline]
 fn traverse_or_install<Child: Default>(parent: &[AtomicPtr<Child>; FANOUT], key: u16) -> &Child {
     let atomic_ptr: &AtomicPtr<Child> = &parent[key as usize];
     punch_through(atomic_ptr)
