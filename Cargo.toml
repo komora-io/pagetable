@@ -1,6 +1,6 @@
 [package]
 name = "pagetable"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 authors = ["Tyler Neely <tylerneely@gmail.com>"]
 description = "Wait-free 4-level 64-bit pagetable for roughly-contiguous keys."

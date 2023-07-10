@@ -22,6 +22,17 @@ fn _impl_send_sync() {
 /// even if they are initialized to zero bytes.
 pub trait Zeroable {}
 
+impl<T: Zeroable, const LEN: usize> Zeroable for [T; LEN] {}
+
+impl<A: Zeroable, B: Zeroable> Zeroable for (A, B) {}
+impl<A: Zeroable, B: Zeroable, C: Zeroable> Zeroable for (A, B, C) {}
+impl<A: Zeroable, B: Zeroable, C: Zeroable, D: Zeroable> Zeroable for (A, B, C, D) {}
+impl<A: Zeroable, B: Zeroable, C: Zeroable, D: Zeroable, E: Zeroable> Zeroable for (A, B, C, D, E) {}
+impl<A: Zeroable, B: Zeroable, C: Zeroable, D: Zeroable, E: Zeroable, F: Zeroable> Zeroable
+    for (A, B, C, D, E, F)
+{
+}
+
 macro_rules! impl_zeroable {
     ($($t:ty),+) => {
         $(
