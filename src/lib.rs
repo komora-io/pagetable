@@ -1,4 +1,5 @@
-use std::mem::MaybeUninit;
+#![deny(clippy::large_stack_arrays, clippy::large_types_passed_by_value)]
+use std::alloc::{alloc_zeroed, Layout};
 use std::ptr::null_mut;
 use std::sync::{
     atomic::{
@@ -20,7 +21,7 @@ fn _impl_send_sync() {
 
 /// This trait is true for numerical values that are valid
 /// even if they are initialized to zero bytes.
-pub trait Zeroable {}
+pub trait Zeroable: Sync {}
 
 impl<T: Zeroable, const LEN: usize> Zeroable for [T; LEN] {}
 
@@ -111,9 +112,13 @@ impl<T: Zeroable> Clone for PageTable<T> {
 
 #[derive(Default)]
 pub struct PageTableInner<T: Zeroable> {
+    // the "root" entry point for anything that can't use shortcuts
     l1: AtomicPtr<L1<T>>,
+    // third-fastest shortcut for the first 2^48 keys
     l2: AtomicPtr<L2<T>>,
+    // second-fastest shortcut for the first 2^32 keys
     l3: AtomicPtr<L3<T>>,
+    // fastest shortcut for the first 2^16 keys to avoid pointer chasing
     l4: AtomicPtr<L4<T>>,
 }
 
@@ -155,11 +160,14 @@ struct L4<T> {
 }
 
 #[inline]
-fn punch_through<Child: Default>(atomic_ptr: &AtomicPtr<Child>) -> &Child {
+fn punch_through<Child: Zeroable>(atomic_ptr: &AtomicPtr<Child>) -> &Child {
     let mut ptr = atomic_ptr.load(Ordering::Acquire);
 
     if ptr.is_null() {
-        let new_child_ptr = Box::into_raw(Box::default());
+        let layout = Layout::new::<Child>();
+        let new_child_ptr = unsafe { alloc_zeroed(layout) as *mut Child };
+        assert!(!new_child_ptr.is_null());
+
         match atomic_ptr.compare_exchange(
             null_mut(),
             new_child_ptr,
@@ -185,7 +193,7 @@ fn punch_through<Child: Default>(atomic_ptr: &AtomicPtr<Child>) -> &Child {
 // This is conveniently wait-free due to the bounded maximum amount of work that may happen
 // in this process.
 #[inline]
-fn traverse_or_install<Child: Default>(parent: &[AtomicPtr<Child>; FANOUT], key: u16) -> &Child {
+fn traverse_or_install<Child: Zeroable>(parent: &[AtomicPtr<Child>; FANOUT], key: u16) -> &Child {
     let atomic_ptr: &AtomicPtr<Child> = &parent[key as usize];
     punch_through(atomic_ptr)
 }
@@ -233,16 +241,19 @@ impl<T: Zeroable, I: Into<u64>> std::ops::Index<I> for PageTable<T> {
     }
 }
 
+impl<T: Zeroable> Zeroable for L1<T> {}
+impl<T: Zeroable> Zeroable for L2<T> {}
+impl<T: Zeroable> Zeroable for L3<T> {}
+impl<T: Zeroable> Zeroable for L4<T> {}
+
 macro_rules! impl_drop_children {
-    ($t:ty) => {
-        impl<T> Drop for $t {
+    ($parent:ty, $child:ty) => {
+        impl<T> Drop for $parent {
             fn drop(&mut self) {
                 for child in &self.children {
-                    let ptr = child.load(Ordering::Acquire);
+                    let ptr: *mut $child = child.load(Ordering::Acquire);
                     if !ptr.is_null() {
-                        unsafe {
-                            drop(Box::from_raw(ptr));
-                        }
+                        unsafe { drop(Box::from_raw(ptr)) }
                     }
                 }
             }
@@ -250,27 +261,10 @@ macro_rules! impl_drop_children {
     };
 }
 
-impl_drop_children!(L1<T>);
-impl_drop_children!(L2<T>);
-impl_drop_children!(L3<T>);
+impl_drop_children!(L1<T>, L2<T>);
+impl_drop_children!(L2<T>, L3<T>);
+impl_drop_children!(L3<T>, L4<T>);
 // not needed for L4
-
-macro_rules! impl_zeroed_default {
-    ($t:ty) => {
-        impl<T> Default for $t {
-            fn default() -> Self {
-                Self {
-                    children: unsafe { MaybeUninit::zeroed().assume_init() },
-                }
-            }
-        }
-    };
-}
-
-impl_zeroed_default!(L1<T>);
-impl_zeroed_default!(L2<T>);
-impl_zeroed_default!(L3<T>);
-impl_zeroed_default!(L4<T>);
 
 #[test]
 fn smoke() {
