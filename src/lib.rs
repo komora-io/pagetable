@@ -97,9 +97,14 @@ impl<T> Zeroable for AtomicPtr<T> {}
 ///     assert_eq!(value, 1);
 /// }
 /// ```
-#[derive(Default)]
 pub struct PageTable<T: Zeroable> {
     inner: Arc<PageTableInner<T>>,
+}
+
+impl<T: Zeroable> Default for PageTable<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T: Zeroable> Clone for PageTable<T> {
@@ -110,7 +115,6 @@ impl<T: Zeroable> Clone for PageTable<T> {
     }
 }
 
-#[derive(Default)]
 pub struct PageTableInner<T: Zeroable> {
     // the "root" entry point for anything that can't use shortcuts
     l1: AtomicPtr<L1<T>>,
@@ -120,6 +124,17 @@ pub struct PageTableInner<T: Zeroable> {
     l3: AtomicPtr<L3<T>>,
     // fastest shortcut for the first 2^16 keys to avoid pointer chasing
     l4: AtomicPtr<L4<T>>,
+}
+
+impl<T: Zeroable> Default for PageTableInner<T> {
+    fn default() -> Self {
+        PageTableInner {
+            l1: AtomicPtr::new(null_mut()),
+            l2: AtomicPtr::new(null_mut()),
+            l3: AtomicPtr::new(null_mut()),
+            l4: AtomicPtr::new(null_mut()),
+        }
+    }
 }
 
 impl<T: Zeroable> Drop for PageTableInner<T> {
@@ -199,6 +214,13 @@ fn traverse_or_install<Child: Zeroable>(parent: &[AtomicPtr<Child>; FANOUT], key
 }
 
 impl<T: Zeroable> PageTable<T> {
+    /// Create a new `PageTable`.
+    pub fn new() -> Self {
+        PageTable {
+            inner: Arc::default(),
+        }
+    }
+
     /// Get the `AtomicU64` associated with the provided key,
     /// installing all required pages if it does not exist yet.
     /// Defaults to `0`.
